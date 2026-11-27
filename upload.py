@@ -1,12 +1,16 @@
-import os
+import base64
+import html
 import io
 import json
+import os
 import random
 import re
+import shutil
 import subprocess
 import tempfile
 import time
 import requests
+from PIL import Image, ImageEnhance, ImageFilter, ImageStat
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
@@ -57,20 +61,66 @@ Creator: IELTS Advantage
 Source: https://www.youtube.com/watch?v=8pnGARTYMpg
 License: Creative Commons Attribution (CC BY).""",
     },
-    # নতুন ফোল্ডার যোগ করতে উপরের ব্লকের শেষে কমা (,) রেখে নিচে একইভাবে লিখুন:
-    # {
-    #     "folder_id": "drive_folder_id_4",
-    #     "attribution": """folder 4 attribution""",
-    # },
-    # {
-    #     "folder_id": "drive_folder_id_5",
-    #     "attribution": """folder 5 attribution""",
-    # },
 ]
 
 STATE_FILE = "uploaded_videos.json"
 REEL_CAPTION_MAX_LEN = 2200
 PAGE_DESCRIPTION_MAX_LEN = 10000
+
+VIRAL_THUMB_THEMES = [
+    {
+        "name": "mrbeast_yellow",
+        "badge_bg": "linear-gradient(135deg, #FF0844 0%, #FF5500 100%)",
+        "badge_text": "#FFFFFF",
+        "badge_border": "#FFFFFF",
+        "badge_glow": "rgba(255, 20, 68, 0.70)",
+        "tape_bg": "linear-gradient(135deg, #FFE600 0%, #FFB800 100%)",
+        "tape_text": "#080808",
+        "tape_stroke": "0px transparent",
+        "tape_border": "#000000",
+        "accent_glow": "rgba(255, 214, 0, 0.36)",
+        "frame_border": "#FFD600",
+    },
+    {
+        "name": "crimson_shock",
+        "badge_bg": "linear-gradient(135deg, #101218 0%, #1E2230 100%)",
+        "badge_text": "#FFE600",
+        "badge_border": "#FFE600",
+        "badge_glow": "rgba(255, 214, 0, 0.55)",
+        "tape_bg": "linear-gradient(135deg, #FF0F39 0%, #D6002A 100%)",
+        "tape_text": "#FFFFFF",
+        "tape_stroke": "6px #000000",
+        "tape_border": "#FFFFFF",
+        "accent_glow": "rgba(255, 15, 57, 0.40)",
+        "frame_border": "#FF1744",
+    },
+    {
+        "name": "neon_emerald",
+        "badge_bg": "linear-gradient(135deg, #FF1744 0%, #FF6D00 100%)",
+        "badge_text": "#FFFFFF",
+        "badge_border": "#FFFFFF",
+        "badge_glow": "rgba(255, 23, 68, 0.65)",
+        "tape_bg": "linear-gradient(135deg, #69F0AE 0%, #00E676 100%)",
+        "tape_text": "#05140B",
+        "tape_stroke": "0px transparent",
+        "tape_border": "#000000",
+        "accent_glow": "rgba(0, 230, 118, 0.32)",
+        "frame_border": "#00E676",
+    },
+    {
+        "name": "electric_cyan",
+        "badge_bg": "linear-gradient(135deg, #7C4DFF 0%, #D500F9 100%)",
+        "badge_text": "#FFFFFF",
+        "badge_border": "#FFFFFF",
+        "badge_glow": "rgba(213, 0, 249, 0.65)",
+        "tape_bg": "linear-gradient(135deg, #18FFFF 0%, #00E5FF 100%)",
+        "tape_text": "#041016",
+        "tape_stroke": "0px transparent",
+        "tape_border": "#000000",
+        "accent_glow": "rgba(0, 229, 255, 0.34)",
+        "frame_border": "#00E5FF",
+    },
+]
 
 
 def get_drive_service():
@@ -144,8 +194,61 @@ def clean_description(description):
     return text
 
 
+def clean_hook_phrase(text, max_words=4, max_chars=24):
+    raw = re.sub(r"#\S+", "", str(text or "")).replace("<", "").replace(">", "")
+    raw = re.sub(r"\s+", " ", raw).strip(' "\'“”|-–—')
+    if not raw:
+        return ""
+    words = raw.split(" ")
+    if len(words) > max_words:
+        raw = " ".join(words[:max_words])
+    if len(raw) > max_chars:
+        cut = raw[:max_chars].rsplit(" ", 1)[0].strip()
+        raw = cut if len(cut) >= 6 else raw[:max_chars].strip()
+    return raw
+
+
+def build_hook_data(data_dict, clean_video_title):
+    default_badges = [
+        "🔥 ৯৯% মানুষ জানে না!",
+        "😱 অবিশ্বাস্য সত্য!",
+        "🚨 মারাত্মক ভুল!",
+        "🎯 গোপন কৌশল!",
+    ]
+    badge = clean_hook_phrase(data_dict.get("hook_badge", ""), max_words=4, max_chars=24)
+    if not badge:
+        badge = random.choice(default_badges)
+    elif not any(ord(ch) > 0x2600 for ch in badge):
+        badge = f"🔥 {badge}"
+
+    line1 = clean_hook_phrase(data_dict.get("hook_line1", ""), max_words=4, max_chars=22)
+    line2 = clean_hook_phrase(data_dict.get("hook_line2", ""), max_words=4, max_chars=22)
+
+    if not line1 or not line2:
+        stripped_title = re.sub(r"#\S+", "", clean_video_title)
+        stripped_title = re.sub(r"\s+", " ", stripped_title).strip(" |-–—!?")
+        parts = [p.strip() for p in re.split(r"[|!?।:—–-]+", stripped_title) if p.strip()]
+        if len(parts) >= 2:
+            line1 = line1 or clean_hook_phrase(parts[0], max_words=3, max_chars=20)
+            line2 = line2 or (clean_hook_phrase(parts[1], max_words=4, max_chars=22) + "!")
+        else:
+            words = stripped_title.split()
+            mid = max(1, min(3, len(words) // 2 or 1))
+            line1 = line1 or clean_hook_phrase(" ".join(words[:mid]), max_words=3, max_chars=20)
+            rem = " ".join(words[mid:]) if len(words) > mid else "এখনই জেনে নিন!"
+            line2 = line2 or clean_hook_phrase(rem, max_words=4, max_chars=22)
+
+    if not line1:
+        line1 = "সফল হতে চাইলে"
+    if not line2:
+        line2 = "এই ১টি কাজ করুন!"
+    if not line2.endswith(("!", "?", "।")):
+        line2 = f"{line2}!"
+
+    return {"badge": badge, "line1": line1, "line2": line2}
+
+
 def split_trailing_hashtags(text):
-    """Separates a trailing hashtag block so hashtags stay intact if body trimming is ever needed."""
     blocks = [b.strip() for b in text.split("\n\n") if b.strip()]
     if len(blocks) < 2:
         return text, ""
@@ -158,10 +261,6 @@ def split_trailing_hashtags(text):
 
 
 def format_facebook_caption(body, attribution="", max_len=PAGE_DESCRIPTION_MAX_LEN):
-    """
-    Combines caption body and attribution without ever cutting off attribution,
-    hashtags, or mid-sentence text.
-    """
     base_body = clean_description(body)
     attr_text = clean_description(attribution)
 
@@ -229,7 +328,8 @@ def parse_metadata_json(raw_text, fallback_title):
         raise ValueError("Generated description is missing or incomplete.")
 
     title = clean_title(raw_title, fallback_title)
-    return title, raw_desc
+    hooks = build_hook_data(data, title)
+    return title, raw_desc, hooks
 
 
 def get_available_gemini_models(headers):
@@ -444,8 +544,8 @@ def generate_with_groq(prompt, fallback_title):
                 {
                     "role": "system",
                     "content": (
-                        "You are an expert Bengali Facebook Page & Reels growth strategist. "
-                        "Always respond strictly with valid JSON containing keys: title, description. "
+                        "You are an expert Bengali Facebook Page & Reels growth strategist and viral thumbnail hook copywriter. "
+                        "Always respond strictly with valid JSON containing keys: title, description, hook_badge, hook_line1, hook_line2. "
                         "Write natural, complete, well-formatted Bengali captions without cutting off any section or hashtag."
                     ),
                 },
@@ -490,8 +590,8 @@ def generate_with_groq(prompt, fallback_title):
 def generate_facebook_metadata(filename):
     fallback_title = os.path.splitext(filename)[0].strip()
     prompt = (
-        "You are a top Bengali Facebook Page & Reels viral content strategist for an educational page. "
-        "Based on the video filename below, generate highly engaging, complete Bengali metadata:\n\n"
+        "You are a top Bengali Facebook Page & Reels viral content strategist and thumbnail hook copywriter for an educational page. "
+        "Based on the video filename below, generate highly engaging Bengali metadata AND scroll-stopping Reel cover hook text:\n\n"
         "1. title:\n"
         "   - Write an attention-grabbing, curiosity-driven Bengali video title (50 to 85 characters) with the main keyword near the start.\n"
         "   - Must be a complete, natural Bengali title.\n\n"
@@ -502,10 +602,14 @@ def generate_facebook_metadata(filename):
         "     * 📌 মূল পয়েন্টসমূহ: 3 to 4 crisp bullet points starting with ✅.\n"
         "     * 💬 এনগেজমেন্ট প্রশ্ন ও CTA: Ask viewers an interesting question to boost comments, and invite them to Like, Share, and Follow the page for more educational videos.\n"
         "     * Hashtags at the bottom: 5 to 7 relevant hashtags on the last line (e.g., #reels #facebookreels #bangla #শিক্ষামূলক plus topic hashtags).\n\n"
+        "3. VIRAL REELS THUMBNAIL HOOK TEXT (CRITICAL - Must make every viewer stop scrolling instantly!):\n"
+        "   - hook_badge: 2 to 3 ultra-punchy Bengali curiosity/shock words starting with ONE emoji from [🔥, 😱, 🚨, 🎯] (e.g., '🔥 ৯৯% মানুষ জানে না!', '😱 মারাত্মক ভুল!', '🎯 গোপন কৌশল!'). Max 20 characters.\n"
+        "   - hook_line1: 2 to 3 short, bold Bengali words creating tension, question, or problem (e.g., 'আত্মবিশ্বাসের ভয়?', 'ইংরেজিতে কথা বলুন', 'স্বপ্ন পূরণের পথে'). Max 18 characters, NO hashtags.\n"
+        "   - hook_line2: 2 to 4 explosive Bengali payoff/climax words ending with '!' or '?' (e.g., '১ মিনিটে জয় করুন!', 'কোনো ভয় ছাড়াই!', 'এই ১টি কাজ করুন!'). Max 20 characters, NO hashtags.\n\n"
         "Strict Rules:\n"
-        "- Regardless of whether the filename is in English, Bangla, or Banglish, ALWAYS write title and description strictly in natural, fluent Bengali.\n"
+        "- Regardless of whether the filename is in English, Bangla, or Banglish, ALWAYS write title, description, and hook fields strictly in natural, fluent Bengali.\n"
         "- Keep the description concise enough (under 1350 characters) so every section, sentence, and hashtag finishes completely.\n"
-        "- Return ONLY valid JSON with exact keys: title, description.\n\n"
+        "- Return ONLY valid JSON with exact keys: title, description, hook_badge, hook_line1, hook_line2.\n\n"
         f"Video Filename: {filename}"
     )
 
@@ -565,7 +669,375 @@ def inspect_video_specs(video_path):
         return None
 
 
-def upload_facebook_reel(video_path, description):
+def score_candidate_frame(img):
+    small = img.convert("RGB")
+    small.thumbnail((480, 480))
+    w, h = small.size
+
+    subject_box = (int(w * 0.15), int(h * 0.08), int(w * 0.85), int(h * 0.62))
+    subject = small.crop(subject_box)
+
+    gray = subject.convert("L")
+    stat = ImageStat.Stat(gray)
+    mean_lum = stat.mean[0]
+    contrast = stat.stddev[0]
+
+    if mean_lum < 32 or mean_lum > 232:
+        exposure_weight = 0.25
+    elif 65 <= mean_lum <= 185:
+        exposure_weight = 1.0
+    else:
+        exposure_weight = 0.65
+
+    edges = gray.filter(ImageFilter.FIND_EDGES)
+    sharpness = ImageStat.Stat(edges).mean[0]
+
+    hsv = subject.convert("HSV")
+    saturation = ImageStat.Stat(hsv).mean[1]
+
+    return (sharpness * 2.4 + contrast * 0.9 + saturation * 0.35) * exposure_weight
+
+
+def extract_best_video_frame(video_path, duration, work_dir):
+    safe_dur = max(duration or 30.0, 1.0)
+    ratios = [0.14, 0.22, 0.30, 0.38, 0.48, 0.58, 0.68, 0.78]
+    best_path = None
+    best_score = -1.0
+
+    for idx, r in enumerate(ratios):
+        ts = max(0.2, min(safe_dur - 0.2, safe_dur * r))
+        frame_path = os.path.join(work_dir, f"cand_{idx}.jpg")
+        cmd = [
+            "ffmpeg", "-y", "-ss", f"{ts:.2f}",
+            "-i", video_path,
+            "-frames:v", "1",
+            "-q:v", "2",
+            frame_path,
+        ]
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=15)
+            if os.path.exists(frame_path) and os.path.getsize(frame_path) > 1000:
+                with Image.open(frame_path) as im:
+                    sc = score_candidate_frame(im)
+                if sc > best_score:
+                    best_score = sc
+                    best_path = frame_path
+        except Exception:
+            continue
+
+    return best_path
+
+
+def find_headless_browser():
+    candidates = [
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium-browser",
+        "chromium",
+        "microsoft-edge",
+        "microsoft-edge-stable",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    ]
+    for c in candidates:
+        if os.path.isabs(c) and os.path.exists(c):
+            return c
+        found = shutil.which(c)
+        if found:
+            return found
+    return None
+
+
+def build_viral_thumbnail_html(bg_data_uri, hook_data, width, height, theme):
+    is_portrait = height >= width
+    badge_esc = html.escape(hook_data["badge"])
+    line1_esc = html.escape(hook_data["line1"])
+    line2_esc = html.escape(hook_data["line2"])
+
+    len1 = len(hook_data["line1"])
+    len2 = len(hook_data["line2"])
+
+    if is_portrait:
+        l1_size = 112 if len1 <= 12 else (96 if len1 <= 16 else (82 if len1 <= 21 else 68))
+        l2_size = 102 if len2 <= 13 else (88 if len2 <= 17 else (74 if len2 <= 22 else 62))
+        badge_size = 46
+        stroke_px = 14
+        layout_css = f"""
+        .hook-wrap {{
+            position: absolute;
+            left: 42px;
+            right: 42px;
+            bottom: 195px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            z-index: 10;
+        }}
+        .scrim {{
+            position: absolute;
+            inset: 0;
+            background:
+                radial-gradient(ellipse at 50% 82%, {theme['accent_glow']} 0%, transparent 52%),
+                linear-gradient(180deg,
+                    rgba(0,0,0,0.18) 0%,
+                    rgba(0,0,0,0.00) 18%,
+                    rgba(0,0,0,0.00) 50%,
+                    rgba(4,6,14,0.68) 63%,
+                    rgba(3,4,10,0.93) 77%,
+                    rgba(2,3,8,0.98) 100%);
+            z-index: 2;
+        }}
+        """
+    else:
+        l1_size = 80 if len1 <= 14 else (68 if len1 <= 19 else 56)
+        l2_size = 76 if len2 <= 15 else (64 if len2 <= 20 else 52)
+        badge_size = 35
+        stroke_px = 11
+        layout_css = f"""
+        .hook-wrap {{
+            position: absolute;
+            left: 52px;
+            right: 52px;
+            bottom: 44px;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            text-align: left;
+            z-index: 10;
+        }}
+        .scrim {{
+            position: absolute;
+            inset: 0;
+            background:
+                radial-gradient(ellipse at 28% 82%, {theme['accent_glow']} 0%, transparent 50%),
+                linear-gradient(180deg,
+                    rgba(0,0,0,0.12) 0%,
+                    rgba(0,0,0,0.00) 36%,
+                    rgba(4,6,14,0.78) 68%,
+                    rgba(2,3,8,0.96) 100%);
+            z-index: 2;
+        }}
+        """
+
+    return f"""<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Anek+Bangla:wght@800&family=Baloo+Da+2:wght@800&family=Hind+Siliguri:wght@700&family=Noto+Color+Emoji&display=swap" rel="stylesheet">
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  html, body {{
+    width: {width}px;
+    height: {height}px;
+    overflow: hidden;
+    background: #05070e;
+    font-family: 'Baloo Da 2', 'Anek Bangla', 'Hind Siliguri', 'Noto Sans Bengali', 'Noto Color Emoji', sans-serif;
+  }}
+  .canvas {{
+    position: relative;
+    width: {width}px;
+    height: {height}px;
+    overflow: hidden;
+  }}
+  .bg-img {{
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: center 18%;
+    transform: scale(1.04);
+    filter: contrast(1.15) saturate(1.26) brightness(1.04);
+    z-index: 1;
+  }}
+  .frame {{
+    position: absolute;
+    inset: 0;
+    box-shadow: inset 0 0 110px rgba(0,0,0,0.55);
+    border: 8px solid {theme['frame_border']};
+    z-index: 4;
+    pointer-events: none;
+  }}
+  {layout_css}
+  .badge {{
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    background: {theme['badge_bg']};
+    color: {theme['badge_text']};
+    font-size: {badge_size}px;
+    font-weight: 800;
+    line-height: 1.15;
+    padding: 12px 36px 10px 36px;
+    border-radius: 999px;
+    border: 4px solid {theme['badge_border']};
+    box-shadow: 0 10px 30px {theme['badge_glow']}, 0 6px 0 #000000;
+    transform: rotate(-2deg);
+    margin-bottom: 20px;
+  }}
+  .line1 {{
+    color: #FFFFFF;
+    font-size: {l1_size}px;
+    font-weight: 800;
+    line-height: 1.14;
+    paint-order: stroke fill;
+    -webkit-text-stroke: {stroke_px}px #000000;
+    text-shadow: 0 6px 0 #000000, 0 12px 24px rgba(0,0,0,0.95);
+    margin-bottom: 16px;
+    max-width: 100%;
+  }}
+  .tape {{
+    display: inline-block;
+    background: {theme['tape_bg']};
+    border: 5px solid {theme['tape_border']};
+    border-radius: 22px;
+    padding: 12px 36px 8px 36px;
+    box-shadow: 0 12px 0 #000000, 0 20px 42px rgba(0,0,0,0.92);
+    transform: rotate(-1.4deg);
+    max-width: 100%;
+  }}
+  .line2 {{
+    color: {theme['tape_text']};
+    font-size: {l2_size}px;
+    font-weight: 800;
+    line-height: 1.14;
+    paint-order: stroke fill;
+    -webkit-text-stroke: {theme['tape_stroke']};
+  }}
+</style>
+</head>
+<body>
+  <div class="canvas">
+    <img class="bg-img" src="{bg_data_uri}" alt="" />
+    <div class="scrim"></div>
+    <div class="frame"></div>
+    <div class="hook-wrap">
+      <div class="badge">{badge_esc}</div>
+      <div class="line1">{line1_esc}</div>
+      <div class="tape">
+        <div class="line2">{line2_esc}</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
+def save_optimized_jpeg(img, dest_path, max_bytes=4500000):
+    rgb = img.convert("RGB")
+    for quality in (93, 88, 82, 75):
+        rgb.save(dest_path, "JPEG", quality=quality, subsampling=0, optimize=True)
+        if os.path.getsize(dest_path) <= max_bytes:
+            return
+    rgb.save(dest_path, "JPEG", quality=70, optimize=True)
+
+
+def generate_viral_thumbnail(video_path, dest_thumb_path, hook_data):
+    specs = inspect_video_specs(video_path)
+    if specs is not None:
+        vid_w, vid_h, duration = specs
+    else:
+        vid_w, vid_h, duration = 1080, 1920, 30.0
+
+    mode = FB_UPLOAD_MODE.upper().strip()
+    is_portrait = True if mode == "REELS" else (vid_h >= vid_w)
+    target_w, target_h = (1080, 1920) if is_portrait else (1280, 720)
+    theme = random.choice(VIRAL_THUMB_THEMES)
+
+    work_dir = tempfile.mkdtemp(prefix="fb_thumb_")
+    try:
+        best_frame = extract_best_video_frame(video_path, duration, work_dir)
+        if not best_frame:
+            fallback_img = Image.new("RGB", (target_w, target_h), (18, 24, 42))
+            best_frame = os.path.join(work_dir, "fallback.jpg")
+            fallback_img.save(best_frame, "JPEG", quality=90)
+
+        with open(best_frame, "rb") as bf:
+            data_uri = "data:image/jpeg;base64," + base64.b64encode(bf.read()).decode("ascii")
+
+        browser = find_headless_browser()
+        if browser:
+            html_path = os.path.join(work_dir, "thumb.html")
+            png_path = os.path.join(work_dir, "thumb.png")
+            html_content = build_viral_thumbnail_html(data_uri, hook_data, target_w, target_h, theme)
+            with open(html_path, "w", encoding="utf-8") as hf:
+                hf.write(html_content)
+
+            file_url = "file:///" + os.path.abspath(html_path).replace("\\", "/")
+            cmd = [
+                browser,
+                "--headless=new",
+                "--disable-gpu",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--hide-scrollbars",
+                "--force-device-scale-factor=1",
+                f"--window-size={target_w},{target_h}",
+                "--virtual-time-budget=4000",
+                f"--screenshot={png_path}",
+                file_url,
+            ]
+            subprocess.run(cmd, check=True, capture_output=True, timeout=40)
+            if os.path.exists(png_path) and os.path.getsize(png_path) > 5000:
+                with Image.open(png_path) as rendered:
+                    cropped = rendered.convert("RGB").crop((0, 0, target_w, target_h))
+                    save_optimized_jpeg(cropped, dest_thumb_path)
+                print(
+                    f"Viral hook thumbnail generated ({target_w}x{target_h}, theme={theme['name']}, "
+                    f"size={os.path.getsize(dest_thumb_path) // 1024}KB)."
+                )
+                return True
+
+        with Image.open(best_frame) as im:
+            im = im.convert("RGB").resize((target_w, target_h), Image.Resampling.LANCZOS)
+            im = ImageEnhance.Contrast(im).enhance(1.18)
+            im = ImageEnhance.Color(im).enhance(1.25)
+            save_optimized_jpeg(im, dest_thumb_path)
+        print("Fallback enhanced frame thumbnail generated.")
+        return True
+    except Exception as e:
+        print(f"[Warning] Thumbnail generation failed: {e}")
+        return False
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def set_facebook_thumbnail(video_id, thumb_path):
+    """Uploads custom cover thumbnail to a published Facebook Reel or Page Video via /{video_id}/thumbnails."""
+    if not video_id or not thumb_path or not os.path.exists(thumb_path):
+        return False
+
+    thumb_url = f"https://graph.facebook.com/{FB_API_VERSION}/{video_id}/thumbnails"
+    for attempt in range(1, 5):
+        try:
+            with open(thumb_path, "rb") as tf:
+                res = requests.post(
+                    thumb_url,
+                    data={
+                        "access_token": FB_PAGE_ACCESS_TOKEN,
+                        "is_preferred": "true",
+                    },
+                    files={"source": ("thumbnail.jpg", tf, "image/jpeg")},
+                    timeout=45,
+                )
+            if res.status_code == 200 and res.json().get("success"):
+                print(f"Custom viral thumbnail applied to Facebook video/Reel {video_id}!")
+                return True
+            print(f"[Thumbnail attempt {attempt}/4] Facebook response ({res.status_code}): {res.text[:220]}")
+        except Exception as e:
+            print(f"[Thumbnail attempt {attempt}/4] Exception: {e}")
+        if attempt < 4:
+            time.sleep(6)
+
+    print(f"[Warning] Could not confirm custom thumbnail via /thumbnails for {video_id}.")
+    return False
+
+
+def upload_facebook_reel(video_path, description, thumb_path=None):
     file_size = os.path.getsize(video_path)
     init_finish_url = f"https://graph.facebook.com/{FB_API_VERSION}/{FB_PAGE_ID}/video_reels"
 
@@ -619,9 +1091,8 @@ def upload_facebook_reel(video_path, description):
     if not finish_res.get("success"):
         raise RuntimeError(f"Reel finish failed: {finish_res}")
 
-    # সংক্ষিপ্ত স্ট্যাটাস চেক: Facebook অ্যাসিঙ্ক্রোনাস প্রসেসিংয়ে সাথে সাথে এরর দিলে ধরতে পারবে
     status_url = f"https://graph.facebook.com/{FB_API_VERSION}/{video_id}"
-    for _ in range(3):
+    for _ in range(8):
         time.sleep(4)
         st_res = requests.get(
             status_url,
@@ -640,10 +1111,12 @@ def upload_facebook_reel(video_path, description):
             break
 
     print(f"Published as Facebook Reel! Video ID: {video_id}")
+    if thumb_path and os.path.exists(thumb_path):
+        set_facebook_thumbnail(video_id, thumb_path)
     return video_id
 
 
-def upload_facebook_page_video(video_path, title, description):
+def upload_facebook_page_video(video_path, title, description, thumb_path=None):
     file_size = os.path.getsize(video_path)
     base_url = f"https://graph-video.facebook.com/{FB_API_VERSION}/{FB_PAGE_ID}/videos"
 
@@ -697,53 +1170,65 @@ def upload_facebook_page_video(video_path, title, description):
             progress = int((min(start_offset, file_size) / max(file_size, 1)) * 100)
             print(f"Uploading to Facebook Page: {progress}%")
 
-    finish_res = safe_json(
-        requests.post(
-            base_url,
-            data={
-                "upload_phase": "finish",
-                "upload_session_id": upload_session_id,
-                "title": title,
-                "description": description,
-                "published": "true",
-                "access_token": FB_PAGE_ACCESS_TOKEN,
-            },
-            timeout=60,
-        ),
-        "Page video finish",
-    )
+    finish_files = None
+    thumb_fh = None
+    try:
+        if thumb_path and os.path.exists(thumb_path):
+            thumb_fh = open(thumb_path, "rb")
+            finish_files = {"thumb": ("thumbnail.jpg", thumb_fh, "image/jpeg")}
+
+        finish_res = safe_json(
+            requests.post(
+                base_url,
+                data={
+                    "upload_phase": "finish",
+                    "upload_session_id": upload_session_id,
+                    "title": title,
+                    "description": description,
+                    "published": "true",
+                    "access_token": FB_PAGE_ACCESS_TOKEN,
+                },
+                files=finish_files,
+                timeout=60,
+            ),
+            "Page video finish",
+        )
+    finally:
+        if thumb_fh:
+            thumb_fh.close()
 
     if not finish_res.get("success"):
         raise RuntimeError(f"Page video finish failed: {finish_res}")
 
     print(f"Published as Facebook Page Video! Video ID: {video_id}")
+    if video_id and thumb_path and os.path.exists(thumb_path) and not finish_files:
+        set_facebook_thumbnail(video_id, thumb_path)
     return video_id
 
 
-def upload_to_facebook(video_path, title, description, attribution=""):
+def upload_to_facebook(video_path, title, description, attribution="", thumb_path=None):
     mode = FB_UPLOAD_MODE.upper().strip()
     reel_caption = build_reel_caption(title, description, attribution)
     page_description = format_facebook_caption(description, attribution, max_len=PAGE_DESCRIPTION_MAX_LEN)
 
     if mode == "REELS":
-        return upload_facebook_reel(video_path, reel_caption)
+        return upload_facebook_reel(video_path, reel_caption, thumb_path=thumb_path)
     if mode == "VIDEO":
-        return upload_facebook_page_video(video_path, title, page_description)
+        return upload_facebook_page_video(video_path, title, page_description, thumb_path=thumb_path)
 
-    # AUTO mode: প্রথমে ভিডিওর দৈর্ঘ্য ও অনুপাত (9:16, ৩-৯০ সেকেন্ড) চেক করবে
     specs = inspect_video_specs(video_path)
     if specs is not None:
         width, height, duration = specs
         print(f"Detected video specs: {width}x{height}, duration={duration:.1f}s")
         if width > height or duration < 3.0 or duration > 90.0:
             print("Video is horizontal or outside 3-90s Reel limit. Uploading directly as Facebook Page Video...")
-            return upload_facebook_page_video(video_path, title, page_description)
+            return upload_facebook_page_video(video_path, title, page_description, thumb_path=thumb_path)
 
     try:
-        return upload_facebook_reel(video_path, reel_caption)
+        return upload_facebook_reel(video_path, reel_caption, thumb_path=thumb_path)
     except Exception as e:
         print(f"Reels upload skipped/failed ({e}). Falling back to regular Facebook Page Video...")
-        return upload_facebook_page_video(video_path, title, page_description)
+        return upload_facebook_page_video(video_path, title, page_description, thumb_path=thumb_path)
 
 
 def list_drive_videos(drive, folder_id):
@@ -844,6 +1329,7 @@ def main():
     file_name = selected_video["name"]
     attribution = selected_folder["attribution"]
     temp_path = os.path.join(tempfile.gettempdir(), "temp_fb_video.mp4")
+    thumb_path = os.path.join(tempfile.gettempdir(), "temp_fb_thumb.jpg")
 
     print(f"\nSelected Folder #{selected_folder['index']} ({selected_folder['folder_id']})")
     print(f"Processing: {file_name}")
@@ -853,17 +1339,26 @@ def main():
         print("Both Gemini and Groq APIs failed. Skipping upload for this run so it retries cleanly next time.")
         return
 
-    title, description = metadata
+    title, description, hook_data = metadata
     print(f"Generated Title: {title}")
+    print(f"Generated Thumbnail Hook: [{hook_data['badge']}] {hook_data['line1']} -> {hook_data['line2']}")
     if attribution:
         print(f"Attribution Ready ({len(attribution)} chars)")
 
     try:
         download_video(drive, file_id, temp_path)
-        upload_to_facebook(temp_path, title, description, attribution)
+        thumb_ok = generate_viral_thumbnail(temp_path, thumb_path, hook_data)
+        upload_to_facebook(
+            temp_path,
+            title,
+            description,
+            attribution,
+            thumb_path=thumb_path if thumb_ok else None,
+        )
     finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        for p in (temp_path, thumb_path):
+            if os.path.exists(p):
+                os.remove(p)
 
     uploaded_ids.append(file_id)
     save_uploaded_ids(uploaded_ids)
