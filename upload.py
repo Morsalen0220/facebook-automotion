@@ -749,9 +749,26 @@ def find_headless_browser():
     return None
 
 
+def render_badge_with_twemoji(badge_text):
+    parts = []
+    for ch in badge_text:
+        cp = ord(ch)
+        if cp in (0xFE0F, 0x200D):
+            continue
+        if cp > 0x2000 and not (0x0980 <= cp <= 0x09FF):
+            hex_cp = f"{cp:x}"
+            parts.append(
+                f'<img class="emoji-icon" src="https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/svg/{hex_cp}.svg" '
+                f'alt="{html.escape(ch)}" onerror="this.replaceWith(document.createTextNode(this.alt))" />'
+            )
+        else:
+            parts.append(html.escape(ch))
+    return "".join(parts)
+
+
 def build_viral_thumbnail_html(bg_data_uri, hook_data, width, height, theme):
     is_portrait = height >= width
-    badge_esc = html.escape(hook_data["badge"])
+    badge_esc = render_badge_with_twemoji(hook_data["badge"])
     line1_esc = html.escape(hook_data["line1"])
     line2_esc = html.escape(hook_data["line2"])
 
@@ -866,7 +883,7 @@ def build_viral_thumbnail_html(bg_data_uri, hook_data, width, height, theme):
   .badge {{
     display: inline-flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
     background: {theme['badge_bg']};
     color: {theme['badge_text']};
     font-size: {badge_size}px;
@@ -878,6 +895,12 @@ def build_viral_thumbnail_html(bg_data_uri, hook_data, width, height, theme):
     box-shadow: 0 10px 30px {theme['badge_glow']}, 0 6px 0 #000000;
     transform: rotate(-2deg);
     margin-bottom: 20px;
+  }}
+  .emoji-icon {{
+    width: {badge_size + 2}px;
+    height: {badge_size + 2}px;
+    flex-shrink: 0;
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.45));
   }}
   .line1 {{
     color: #FFFFFF;
