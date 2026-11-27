@@ -1,9 +1,7 @@
 name: Auto Publish Drive Videos to Facebook Page
 
 on:
-  schedule:
-    - cron: '37 */4 * * *' # প্রতি ৪ ঘণ্টা পরপর অটোমেটিক চলবে (6:37, 10:37, 2:37)
-  workflow_dispatch:       # ম্যানুয়ালি টেস্ট করার জন্য Run বাটন চালু রাখবে
+  workflow_dispatch:       # cron-job.org ও ম্যানুয়ালি Run করার জন্য চালু থাকবে
 
 permissions:
   contents: write
