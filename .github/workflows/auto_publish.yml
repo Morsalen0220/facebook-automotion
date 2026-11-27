@@ -2,6 +2,11 @@ name: Auto Publish Drive Videos to Facebook Page
 
 on:
   workflow_dispatch:       # cron-job.org ও ম্যানুয়ালি Run করার জন্য চালু থাকবে
+    inputs:
+      repair_reel_id:
+        description: 'Optional Facebook Reel/Video ID to regenerate/fix thumbnail only'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -39,6 +44,7 @@ jobs:
           FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          REPAIR_REEL_ID: ${{ inputs.repair_reel_id }}
         run: python upload.py
 
       - name: Save uploaded video history
