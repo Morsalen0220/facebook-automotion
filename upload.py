@@ -686,7 +686,10 @@ def score_candidate_frame(img):
     small.thumbnail((480, 480))
     w, h = small.size
 
-    subject_box = (int(w * 0.14), int(h * 0.10), int(w * 0.86), int(h * 0.58))
+    full_gray = small.convert("L")
+    full_lum = ImageStat.Stat(full_gray).mean[0]
+
+    subject_box = (int(w * 0.14), int(h * 0.15), int(w * 0.86), int(h * 0.48))
     subject = small.crop(subject_box)
 
     gray = subject.convert("L")
@@ -694,9 +697,9 @@ def score_candidate_frame(img):
     mean_lum = stat.mean[0]
     contrast = stat.stddev[0]
 
-    if mean_lum < 32 or mean_lum > 235:
+    if mean_lum < 28 or mean_lum > 238:
         exposure_weight = 0.25
-    elif 60 <= mean_lum <= 195:
+    elif 55 <= mean_lum <= 200:
         exposure_weight = 1.0
     else:
         exposure_weight = 0.65
@@ -708,14 +711,26 @@ def score_candidate_frame(img):
     saturation = ImageStat.Stat(hsv).mean[1]
 
     skin_ratio = estimate_skin_presence(subject)
-    face_bonus = 1.0 + min(skin_ratio * 2.8, 0.95)
+    face_bonus = 1.0 + min(skin_ratio * 3.0, 1.10)
 
-    return (sharpness * 2.2 + contrast * 0.9 + saturation * 0.35) * exposure_weight * face_bonus
+    template_bonus = 1.0
+    if h > w:
+        top_lum = ImageStat.Stat(full_gray.crop((0, 0, w, int(h * 0.13)))).mean[0]
+        sub_crop = full_gray.crop((int(w * 0.12), int(h * 0.51), int(w * 0.88), int(h * 0.65)))
+        sub_stat = ImageStat.Stat(sub_crop)
+        if top_lum > 175 and sub_stat.mean[0] > 175:
+            template_bonus = 2.2
+            if sub_stat.stddev[0] > 16:
+                template_bonus = 2.8
+        elif full_lum < 65 and skin_ratio < 0.03:
+            template_bonus = 0.15
+
+    return (sharpness * 2.2 + contrast * 0.9 + saturation * 0.35) * exposure_weight * face_bonus * template_bonus
 
 
 def extract_best_video_frame(video_path, duration, work_dir):
     safe_dur = max(duration or 30.0, 1.0)
-    ratios = [0.14, 0.22, 0.30, 0.38, 0.48, 0.58, 0.68, 0.78]
+    ratios = [0.12, 0.20, 0.28, 0.36, 0.44, 0.52, 0.60, 0.68]
     best_path = None
     best_score = -1.0
 
@@ -798,9 +813,9 @@ def build_viral_thumbnail_html(bg_data_uri, hook_data, width, height, theme):
         layout_css = f"""
         .hook-wrap {{
             position: absolute;
-            left: 42px;
-            right: 42px;
-            bottom: 195px;
+            left: 40px;
+            right: 40px;
+            bottom: 175px;
             display: flex;
             flex-direction: column;
             align-items: center;
@@ -811,14 +826,13 @@ def build_viral_thumbnail_html(bg_data_uri, hook_data, width, height, theme):
             position: absolute;
             inset: 0;
             background:
-                radial-gradient(ellipse at 50% 82%, {theme['accent_glow']} 0%, transparent 52%),
+                radial-gradient(ellipse at 50% 86%, {theme['accent_glow']} 0%, transparent 48%),
                 linear-gradient(180deg,
-                    rgba(0,0,0,0.18) 0%,
-                    rgba(0,0,0,0.00) 18%,
-                    rgba(0,0,0,0.00) 50%,
-                    rgba(4,6,14,0.68) 63%,
-                    rgba(3,4,10,0.93) 77%,
-                    rgba(2,3,8,0.98) 100%);
+                    rgba(0,0,0,0.00) 0%,
+                    rgba(0,0,0,0.00) 60%,
+                    rgba(4,6,14,0.72) 69%,
+                    rgba(3,4,10,0.95) 78%,
+                    rgba(2,3,8,0.99) 100%);
             z-index: 2;
         }}
         """
@@ -881,9 +895,8 @@ def build_viral_thumbnail_html(bg_data_uri, hook_data, width, height, theme):
     width: 100%;
     height: 100%;
     object-fit: cover;
-    object-position: center 18%;
-    transform: scale(1.04);
-    filter: contrast(1.15) saturate(1.26) brightness(1.04);
+    object-position: center center;
+    filter: contrast(1.08) saturate(1.16);
     z-index: 1;
   }}
   .frame {{
