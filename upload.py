@@ -669,12 +669,24 @@ def inspect_video_specs(video_path):
         return None
 
 
+def estimate_skin_presence(rgb_crop):
+    tiny = rgb_crop.convert("RGB").resize((64, 64))
+    raw = tiny.tobytes()
+    total = len(raw) // 3
+    skin_count = 0
+    for i in range(0, len(raw), 3):
+        r, g, b = raw[i], raw[i + 1], raw[i + 2]
+        if r > 90 and g > 40 and b > 20 and r > g and (r - g) >= 12 and (r - b) >= 20 and r < 248:
+            skin_count += 1
+    return skin_count / max(total, 1)
+
+
 def score_candidate_frame(img):
     small = img.convert("RGB")
     small.thumbnail((480, 480))
     w, h = small.size
 
-    subject_box = (int(w * 0.15), int(h * 0.08), int(w * 0.85), int(h * 0.62))
+    subject_box = (int(w * 0.14), int(h * 0.10), int(w * 0.86), int(h * 0.58))
     subject = small.crop(subject_box)
 
     gray = subject.convert("L")
@@ -682,9 +694,9 @@ def score_candidate_frame(img):
     mean_lum = stat.mean[0]
     contrast = stat.stddev[0]
 
-    if mean_lum < 32 or mean_lum > 232:
+    if mean_lum < 32 or mean_lum > 235:
         exposure_weight = 0.25
-    elif 65 <= mean_lum <= 185:
+    elif 60 <= mean_lum <= 195:
         exposure_weight = 1.0
     else:
         exposure_weight = 0.65
@@ -695,7 +707,10 @@ def score_candidate_frame(img):
     hsv = subject.convert("HSV")
     saturation = ImageStat.Stat(hsv).mean[1]
 
-    return (sharpness * 2.4 + contrast * 0.9 + saturation * 0.35) * exposure_weight
+    skin_ratio = estimate_skin_presence(subject)
+    face_bonus = 1.0 + min(skin_ratio * 2.8, 0.95)
+
+    return (sharpness * 2.2 + contrast * 0.9 + saturation * 0.35) * exposure_weight * face_bonus
 
 
 def extract_best_video_frame(video_path, duration, work_dir):
