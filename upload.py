@@ -24,6 +24,7 @@ FB_API_VERSION = os.environ.get("FB_API_VERSION", "v21.0").strip()
 FALLBACK_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+REPAIR_REEL_ID = os.environ.get("REPAIR_REEL_ID", "").strip()
 
 # ==============================================================================
 # FACEBOOK UPLOAD MODE
@@ -787,10 +788,20 @@ def render_badge_with_twemoji(badge_text):
             continue
         if cp > 0x2000 and not (0x0980 <= cp <= 0x09FF):
             hex_cp = f"{cp:x}"
-            parts.append(
-                f'<img class="emoji-icon" src="https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/svg/{hex_cp}.svg" '
-                f'alt="{html.escape(ch)}" onerror="this.replaceWith(document.createTextNode(this.alt))" />'
-            )
+            svg_uri = None
+            try:
+                r = requests.get(
+                    f"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/svg/{hex_cp}.svg",
+                    timeout=4,
+                )
+                if r.status_code == 200 and b"<svg" in r.content:
+                    svg_uri = "data:image/svg+xml;base64," + base64.b64encode(r.content).decode("ascii")
+            except Exception:
+                pass
+            if svg_uri:
+                parts.append(f'<img class="emoji-icon" src="{svg_uri}" alt="" />')
+            else:
+                parts.append(html.escape(ch))
         else:
             parts.append(html.escape(ch))
     return "".join(parts)
@@ -1019,29 +1030,41 @@ def generate_viral_thumbnail(video_path, dest_thumb_path, hook_data):
                 hf.write(html_content)
 
             file_url = "file:///" + os.path.abspath(html_path).replace("\\", "/")
-            cmd = [
-                browser,
-                "--headless=new",
-                "--disable-gpu",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--hide-scrollbars",
-                "--force-device-scale-factor=1",
-                f"--window-size={target_w},{target_h}",
-                "--virtual-time-budget=4000",
-                f"--screenshot={png_path}",
-                file_url,
-            ]
-            subprocess.run(cmd, check=True, capture_output=True, timeout=40)
-            if os.path.exists(png_path) and os.path.getsize(png_path) > 5000:
-                with Image.open(png_path) as rendered:
-                    cropped = rendered.convert("RGB").crop((0, 0, target_w, target_h))
-                    save_optimized_jpeg(cropped, dest_thumb_path)
-                print(
-                    f"Viral hook thumbnail generated ({target_w}x{target_h}, theme={theme['name']}, "
-                    f"size={os.path.getsize(dest_thumb_path) // 1024}KB)."
-                )
-                return True
+            for headless_flags in (
+                ["--headless=new", "--virtual-time-budget=2500"],
+                ["--headless"],
+            ):
+                if os.path.exists(png_path):
+                    os.remove(png_path)
+                cmd = [
+                    browser,
+                    *headless_flags,
+                    "--disable-gpu",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-extensions",
+                    "--hide-scrollbars",
+                    "--force-device-scale-factor=1",
+                    f"--window-size={target_w},{target_h}",
+                    f"--screenshot={png_path}",
+                    file_url,
+                ]
+                try:
+                    subprocess.run(cmd, check=True, capture_output=True, timeout=22)
+                except Exception as ce:
+                    print(f"[Info] Browser render attempt ({headless_flags[0]}) warning: {ce}")
+                    continue
+                if os.path.exists(png_path) and os.path.getsize(png_path) > 5000:
+                    with Image.open(png_path) as rendered:
+                        cropped = rendered.convert("RGB").crop((0, 0, target_w, target_h))
+                        save_optimized_jpeg(cropped, dest_thumb_path)
+                    print(
+                        f"Viral hook thumbnail generated ({target_w}x{target_h}, theme={theme['name']}, "
+                        f"size={os.path.getsize(dest_thumb_path) // 1024}KB)."
+                    )
+                    return True
 
         with Image.open(best_frame) as im:
             im = im.convert("RGB").resize((target_w, target_h), Image.Resampling.LANCZOS)
@@ -1350,6 +1373,33 @@ def main():
 
     drive = get_drive_service()
     uploaded_ids = load_uploaded_ids()
+
+    if REPAIR_REEL_ID and uploaded_ids:
+        last_drive_id = uploaded_ids[-1]
+        fname = "Why Talking To Yourself In English Is A Helpful Strategy For Fluency.mp4"
+        for folder in configured_folders:
+            try:
+                for f in list_drive_videos(drive, folder["folder_id"]):
+                    if f["id"] == last_drive_id:
+                        fname = f["name"]
+                        break
+            except Exception:
+                continue
+        print(f"[Repair] Regenerating thumbnail for Facebook Reel {REPAIR_REEL_ID} ({fname})...")
+        meta = generate_facebook_metadata(fname)
+        hook_data = meta[2] if meta else {"badge": "🔥 ৯৯% মানুষ জানে!", "line1": "সঙ্গী ছাড়াই ইংরেজি", "line2": "বলুন অনর্গল!"}
+        t_vid = os.path.join(tempfile.gettempdir(), "rep_fb.mp4")
+        t_jpg = os.path.join(tempfile.gettempdir(), "rep_fb.jpg")
+        try:
+            download_video(drive, last_drive_id, t_vid)
+            if generate_viral_thumbnail(t_vid, t_jpg, hook_data):
+                set_facebook_thumbnail(REPAIR_REEL_ID, t_jpg)
+        finally:
+            for p in (t_vid, t_jpg):
+                if os.path.exists(p):
+                    os.remove(p)
+        return
+
     uploaded_set = set(uploaded_ids)
 
     shuffled_folders = list(configured_folders)
